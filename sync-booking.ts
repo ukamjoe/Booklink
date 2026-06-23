@@ -1,42 +1,96 @@
 /**
- * The core sync pipeline: takes a normalized booking and ensures Karbon
- * reflects it. This is deliberately a single function with clear steps so
- * failures are easy to attribute to a step when you're staring at the
- * dashboard wondering why a sync failed.
+ * The core sync pipeline, now per-user and Prisma-backed.
+ *
+ * Gating: a booking only reaches real Karbon API calls if the user's
+ * subscription is active. Anyone can see the dashboard and click around
+ * with their own real booking data, but the sync that actually costs
+ * Karbon API calls (and proves the value) requires payment. Inactive
+ * users get a clearly-labeled "skipped" record explaining why, not a
+ * silent no-op.
  */
 
-import { randomUUID } from "crypto";
 import { getKarbonClient, KarbonApiError } from "@/lib/karbon/client";
-import { syncStore } from "@/lib/db/sync-store";
+import { prisma } from "@/lib/db/prisma";
 import type { IncomingBooking, SyncRecord } from "@/types";
 
 interface SyncOptions {
-  /** Karbon Work Template key to use, if the firm has configured one */
   workTemplateKey?: string;
 }
 
 export async function syncBookingToKarbon(
+  userId: string,
   booking: IncomingBooking,
   options: SyncOptions = {}
 ): Promise<SyncRecord> {
-  const existing = syncStore.getByBookingId(booking.id);
-  if (existing && existing.status === "synced") {
-    // Idempotency: Calendly/Acuity can redeliver webhooks. Don't double-create.
-    return existing;
-  }
-
-  const record = syncStore.create({
-    id: existing?.id ?? randomUUID(),
-    bookingId: booking.id,
-    source: booking.source,
-    status: "pending",
-    clientName: booking.clientName,
-    eventType: booking.eventType,
-    startTime: booking.startTime,
+  const existing = await prisma.syncRecord.findUnique({
+    where: { userId_bookingId: { userId, bookingId: booking.id } },
   });
 
+  if (existing && existing.status === "synced") {
+    // Idempotency: webhook providers redeliver. Don't double-create work items.
+    return toSyncRecord(existing);
+  }
+
+  const record = existing
+    ? await prisma.syncRecord.update({
+        where: { id: existing.id },
+        data: { status: "pending", message: null },
+      })
+    : await prisma.syncRecord.create({
+        data: {
+          userId,
+          bookingId: booking.id,
+          source: booking.source,
+          status: "pending",
+          clientName: booking.clientName,
+          eventType: booking.eventType,
+          startTime: new Date(booking.startTime),
+        },
+      });
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    include: { subscription: true },
+  });
+
+  if (!user) {
+    return toSyncRecord(
+      await prisma.syncRecord.update({
+        where: { id: record.id },
+        data: { status: "failed", message: "Account not found" },
+      })
+    );
+  }
+
+  if (user.subscription?.status !== "active") {
+    return toSyncRecord(
+      await prisma.syncRecord.update({
+        where: { id: record.id },
+        data: {
+          status: "skipped",
+          message: "Subscription inactive — booking received but not synced to Karbon",
+        },
+      })
+    );
+  }
+
+  if (!user.karbonBearerToken || !user.karbonAccessKey) {
+    return toSyncRecord(
+      await prisma.syncRecord.update({
+        where: { id: record.id },
+        data: {
+          status: "failed",
+          message: "Karbon isn't connected yet — add your API credentials in Settings",
+        },
+      })
+    );
+  }
+
   try {
-    const karbon = getKarbonClient();
+    const karbon = getKarbonClient({
+      bearerToken: user.karbonBearerToken,
+      accessKey: user.karbonAccessKey,
+    });
 
     const { contact } = await karbon.resolveContact({
       fullName: booking.clientName,
@@ -53,13 +107,16 @@ export async function syncBookingToKarbon(
       Description: booking.notes,
     });
 
-    return (
-      syncStore.update(record.id, {
-        status: "synced",
-        karbonContactKey: contact.ContactKey,
-        karbonWorkItemKey: workItem.WorkItemKey,
-        message: undefined,
-      }) ?? record
+    return toSyncRecord(
+      await prisma.syncRecord.update({
+        where: { id: record.id },
+        data: {
+          status: "synced",
+          karbonContactKey: contact.ContactKey,
+          karbonWorkItemKey: workItem.WorkItemKey,
+          message: null,
+        },
+      })
     );
   } catch (error) {
     const message =
@@ -69,6 +126,44 @@ export async function syncBookingToKarbon(
           ? error.message
           : "Unknown error during sync";
 
-    return syncStore.update(record.id, { status: "failed", message }) ?? record;
+    return toSyncRecord(
+      await prisma.syncRecord.update({
+        where: { id: record.id },
+        data: { status: "failed", message },
+      })
+    );
   }
+}
+
+// Prisma's generated row shape differs slightly from our API-facing type
+// (Date objects vs ISO strings, null vs undefined) — normalize once here
+// rather than scattering conversions across callers.
+function toSyncRecord(row: {
+  id: string;
+  bookingId: string;
+  source: string;
+  status: string;
+  clientName: string;
+  eventType: string;
+  startTime: Date;
+  karbonContactKey: string | null;
+  karbonWorkItemKey: string | null;
+  message: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}): SyncRecord {
+  return {
+    id: row.id,
+    bookingId: row.bookingId,
+    source: row.source as SyncRecord["source"],
+    status: row.status as SyncRecord["status"],
+    clientName: row.clientName,
+    eventType: row.eventType,
+    startTime: row.startTime.toISOString(),
+    karbonContactKey: row.karbonContactKey ?? undefined,
+    karbonWorkItemKey: row.karbonWorkItemKey ?? undefined,
+    message: row.message ?? undefined,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
 }

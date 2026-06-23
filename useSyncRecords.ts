@@ -14,6 +14,17 @@ export function useSyncRecords(pollIntervalMs = 5000) {
     async function fetchRecords() {
       try {
         const res = await fetch("/api/sync");
+
+        if (res.status === 401) {
+          // Not an error — useAccount() owns the redirect-to-login logic.
+          // Just stop polling quietly until that redirect happens.
+          if (!cancelled) {
+            setRecords([]);
+            setError(null);
+          }
+          return;
+        }
+
         if (!res.ok) throw new Error("Could not load sync records");
         const data = await res.json();
         if (!cancelled) {
