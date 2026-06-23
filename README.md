@@ -55,22 +55,28 @@ that scope now.
 
 ## Setup
 
+### Deploying to Vercel (production)
+
+1. Push this repo to GitHub (already done if you're reading this from there) and import it into a new Vercel project.
+2. In the Vercel project dashboard: **Storage → Create Database → Postgres**. This provisions a free Neon-backed Postgres database and automatically sets `DATABASE_URL` and `DATABASE_URL_UNPOOLED` as project environment variables — you don't need to type these in by hand.
+3. In **Project Settings → Environment Variables**, add the rest:
+   - `NEXT_PUBLIC_URL` — your Vercel deployment URL (e.g. `https://booklink.vercel.app`)
+   - `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID`, `STRIPE_WEBHOOK_SECRET` — see below
+   - `CALENDLY_SIGNING_KEY` — see below
+4. Redeploy (Vercel → Deployments → ⋯ → Redeploy), or just push a new commit. The build now runs `prisma migrate deploy` automatically before building, which creates all the database tables on first deploy.
+5. Visit your deployment URL. You should see the landing page, not a downloaded file. If you still see a download, check the build logs in Vercel for the actual error — it almost always means an environment variable above is missing or misspelled.
+
+### Local development
+
 1. `npm install` (runs `prisma generate` automatically via postinstall)
-2. Copy `.env.example` to `.env.local` and fill in:
-   - `DATABASE_URL` — SQLite file is fine to start
-   - Stripe: create a Product called "BookLink" with one recurring monthly
-     Price, set `STRIPE_PRICE_ID`. Get `STRIPE_SECRET_KEY` from the Stripe
-     dashboard. For `STRIPE_WEBHOOK_SECRET`, either add a webhook endpoint
-     in the dashboard pointing at `/api/stripe/webhook`, or run
-     `stripe listen --forward-to localhost:3000/api/stripe/webhook` locally.
-   - `CALENDLY_SIGNING_KEY` — BookLink's own Calendly developer app's
-     signing key (this one is global; it's not the user's Karbon credentials).
-3. `npx prisma migrate dev --name init` — creates the local SQLite database
-   and tables.
-4. `npm run dev`
-5. Visit `/` → sign up → `/dashboard` is immediately visible. Subscribe via
-   `/pricing` to unlock real syncing, then add Karbon credentials in
-   `/settings`.
+2. Pull the real Postgres env vars Vercel created: `npx vercel link` then `npx vercel env pull .env.local`
+   - Alternatively, copy `.env.example` to `.env.local` and fill in a Postgres connection string yourself (e.g. from a free Neon project at neon.tech).
+3. `npx prisma migrate dev --name init` — only needed once, or after schema changes, for local development.
+4. Fill in the rest of `.env.local`:
+   - Stripe: create a Product called "BookLink" with one recurring monthly Price, set `STRIPE_PRICE_ID`. Get `STRIPE_SECRET_KEY` from the Stripe dashboard. For `STRIPE_WEBHOOK_SECRET`, either add a webhook endpoint in the dashboard pointing at `/api/stripe/webhook`, or run `stripe listen --forward-to localhost:3000/api/stripe/webhook` locally.
+   - `CALENDLY_SIGNING_KEY` — BookLink's own Calendly developer app's signing key (this one is global; it's not the user's Karbon credentials).
+5. `npm run dev`
+6. Visit `/` → sign up → `/dashboard` is immediately visible. Subscribe via `/pricing` to unlock real syncing, then add Karbon credentials in `/settings`.
 
 Each user connects their **own** Karbon account in Settings — there is no
 shared/global Karbon credential anymore. This is what makes the app
@@ -81,9 +87,6 @@ developers.karbonhq.com.
 
 - One-way sync only (Calendly → Karbon). Cancellations/reschedules aren't
   handled yet — `invitee.created` is the only event type processed.
-- SQLite by default. Fine for early pilots; switch the Prisma datasource
-  provider to `postgresql` before scaling past a handful of concurrent
-  users, since SQLite doesn't handle concurrent writes well under load.
 - No multi-user-per-firm support — one login per Karbon connection, not
   a team with shared access.
 - Acuity is in the type system (`BookingSource`) but not wired up yet —
@@ -93,10 +96,9 @@ developers.karbonhq.com.
 
 ## Next steps, roughly in order
 
-1. Switch to Postgres before relying on this for real client data.
-2. Add password reset (email-based token flow).
-3. Add Acuity as a second booking source.
-4. Handle `invitee.canceled` so cancellations don't leave orphaned Work Items.
-5. Let the firm owner pick which Karbon Work Template to use, instead of
+1. Add password reset (email-based token flow).
+2. Add Acuity as a second booking source.
+3. Handle `invitee.canceled` so cancellations don't leave orphaned Work Items.
+4. Let the firm owner pick which Karbon Work Template to use, instead of
    the hardcoded default.
-6. Add retry-from-dashboard for failed syncs.
+5. Add retry-from-dashboard for failed syncs.

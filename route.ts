@@ -1,8 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth/session";
-import { getStripeClient } from "@/lib/stripe/client";
-import { getStripePriceId } from "@/lib/stripe/plans";
 import { prisma } from "@/lib/db/prisma";
+
+const karbonCredentialsSchema = z.object({
+  bearerToken: z.string().trim().min(1, "Bearer token is required"),
+  accessKey: z.string().trim().min(1, "Access key is required"),
+  webhookSigningKey: z
+    .string()
+    .trim()
+    .min(16, "Signing key must be at least 16 characters")
+    .regex(/^[A-Za-z0-9_]+$/, "Signing key can only contain letters, numbers, and underscores"),
+});
 
 export async function POST(req: NextRequest) {
   const user = await getCurrentUser();
@@ -10,39 +19,39 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Sign in first" }, { status: 401 });
   }
 
-  const subscription = await prisma.subscription.findUnique({
-    where: { userId: user.id },
-  });
-
-  if (!subscription) {
-    // Shouldn't happen — every user gets a Subscription row at signup —
-    // but fail loudly rather than silently creating an orphaned Stripe
-    // customer if this invariant is ever broken.
-    return NextResponse.json(
-      { error: "No billing record found for this account" },
-      { status: 500 }
-    );
+  let input;
+  try {
+    input = karbonCredentialsSchema.parse(await req.json());
+  } catch {
+    return NextResponse.json({ error: "Invalid Karbon credentials" }, { status: 400 });
   }
 
-  const origin = req.headers.get("origin") ?? process.env.NEXT_PUBLIC_URL;
-
-  const stripe = getStripeClient();
-  const session = await stripe.checkout.sessions.create({
-    mode: "subscription",
-    customer: subscription.stripeCustomerId,
-    line_items: [{ price: getStripePriceId(), quantity: 1 }],
-    success_url: `${origin}/dashboard?checkout=success`,
-    cancel_url: `${origin}/pricing?checkout=canceled`,
-    client_reference_id: user.id,
-    metadata: { userId: user.id },
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      karbonBearerToken: input.bearerToken,
+      karbonAccessKey: input.accessKey,
+      karbonWebhookSigningKey: input.webhookSigningKey,
+    },
   });
 
-  if (!session.url) {
-    return NextResponse.json(
-      { error: "Could not create checkout session" },
-      { status: 500 }
-    );
+  return NextResponse.json({ success: true });
+}
+
+export async function DELETE() {
+  const user = await getCurrentUser();
+  if (!user) {
+    return NextResponse.json({ error: "Sign in first" }, { status: 401 });
   }
 
-  return NextResponse.json({ url: session.url });
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      karbonBearerToken: null,
+      karbonAccessKey: null,
+      karbonWebhookSigningKey: null,
+    },
+  });
+
+  return NextResponse.json({ success: true });
 }
